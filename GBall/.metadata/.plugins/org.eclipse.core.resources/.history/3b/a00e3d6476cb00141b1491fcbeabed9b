@@ -1,0 +1,41 @@
+package GBall.client;
+
+public class GBMain
+{
+	private static void invalidHost()
+	{
+		System.err.println("Invalid host name specified");
+	}
+	
+	private static void invalidPort()
+	{
+		System.err.println("Invalid port number specified");
+	}
+	
+	public static void main(String[] argc)
+	{
+		if(argc.length == 2)
+		{
+			try
+			{
+				// TODO: read values from command line instead of using hard coded
+				String address = "localhost";
+				int serverPort = 1337;
+				ServerConnection connection = new ServerConnection();
+				int entityID = connection.connect(address, serverPort);
+				connection.start();
+				EntityManager.setControlledEntity(entityID);
+				World.getInstance().setConnection(connection);
+				World.getInstance().process();
+			}
+			catch(NumberFormatException e)
+			{
+				invalidPort();
+			}
+		}
+		else
+		{
+			System.err.println("Usage: server portnumber");
+		}
+	}
+}

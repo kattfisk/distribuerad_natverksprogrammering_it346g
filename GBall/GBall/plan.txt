@@ -1,0 +1,94 @@
+TODO:
+disconnect detection is not working on client side
+
+------ Protocol
+---- Over TCP
+CAVEAT: Uses line delimited JSON, so every object must end with newline
+
+-- Server connect message (first message in handshake)
+JSONObject
+	"tkn" string // secure token used for authentication
+	"id" int // id of the entity that the player has been assigned
+	"UDPport" int // the UDP port to use 
+
+-- Client connect message (Second message in handshake)
+JSONObject
+	"UDPport" int // the UDP port to use 
+
+-- Keep-alive
+Empty JSONObject
+
+-- Score (from server)
+JSONObject
+	"score_t1" int // team 1 score
+	"score_t2" int // team 2 score
+	
+-- Server message
+JSONObject
+// key is the index of the object in EntityManager. receiver must check if a value exists for every object
+0: // ball
+	JSONObject // keys are strings
+		"pnum" int // packet number
+		"pos_x" double
+		"pos_y" double
+		"vel_x" double
+		"vel_y" double
+		(assumed to always be decelerating unless pushed upon)
+[1,...,max]  // ship
+	JSONObject // keys are strings
+		"pnum" int // packet number
+		"pos_x" double
+		"pos_y" double
+		"vel_x" double
+		"vel_y" double
+		"dir_x" double
+		"dir_y" double
+		"acc" bool // accelerating
+		"brk" bool // breaking
+
+-- Client message
+JSONObject
+	"tkn" string // authentication token
+	"pnum" int // packet number
+	"dir_x" double
+	"dir_y" double
+	"acc" bool // accelerating
+	"brk" bool // breaking
+
+------ Mention in report
+Cheating possible via instant turning. Could be handled by sanity check
+
+------ Changes
+-- GameEntity
+Added getJSON that returns state of object
+(client) Added setState(JSONObject) that updates state
+Added bool stateUnread()
+
+-- Ship
+Added overriding getJSON that returns state of object
+Added overriding setState(JSONObject) that updates state
+
+-- EntityManager
+changed m_entities data structure to from LinkedList to ArrayList
+added static classes getState and updateState
+(client) added updateState(JSONObject)
+(client) added getControlledEntityStateUpdate()
+
+-- MsgData
+Removed
+
+-- World
+A bunch of stuff in the main loop.
+
+-- ServerConnection
+Added multithreaded class that manages network communication with server.
+
+-- ClientConnections
+Added multithreaded class that listens for incoming connections and manages communication with clients.
+
+-- ScoreKeeper
+(client) Added setScore
+(server) Added getScore
+
+-- Const
+Added STATE_UPDATES to regulate how many updates are sent after state change

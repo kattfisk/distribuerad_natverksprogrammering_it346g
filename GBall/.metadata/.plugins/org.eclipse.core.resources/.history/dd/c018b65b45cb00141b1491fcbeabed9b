@@ -1,0 +1,490 @@
+package GBall.server;
+
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
+
+import org.json.simple.JSONObject;
+import org.json.simple.JSONValue;
+import org.json.simple.parser.JSONParser;
+import org.json.simple.parser.ParseException;
+
+public class ClientConnections
+{
+	// How often connectivity to server will be checked. In milliseconds.
+	private static final int CONNECTION_TEST_INTERVAL = 4000;
+	private static final int MAX_CLIENTS = 4;
+	private volatile int m_connectedClients;
+	
+	private volatile boolean m_runListener;
+	// Listens for incoming TCP connections, performs handshake and creates receivers and senders
+	private Listener m_listener;
+	
+	// One of these for each connected client
+	private volatile boolean[] m_run;
+	private Session[] m_sessions; // TCP sessions used to detect disconnects
+	private TCPSender[] m_TCPSenders;
+	private UDPReceiver[] m_UDPReceivers;
+	private UDPSender[] m_UDPSenders;
+	// Since there are three threads for each client
+	// [m_connectedClients][Session, TCPSender, UDPReceiver, UDPSender]
+	private Thread[][] m_clientThreads;
+	
+	// For controlling access to shared data
+	private Semaphore m_mutex;
+	
+	// Use start() after creation
+	public ClientConnections(int listenPort)
+	{
+		m_listener = new Listener(listenPort);
+		m_run = new boolean[MAX_CLIENTS];
+		m_sessions = new Session[MAX_CLIENTS];
+		m_TCPSenders = new TCPSender[MAX_CLIENTS];
+		m_UDPReceivers = new UDPReceiver[MAX_CLIENTS];
+		m_UDPSenders = new UDPSender[MAX_CLIENTS];
+		m_clientThreads = new Thread[MAX_CLIENTS][4];
+		m_mutex = new Semaphore(1, true);
+	}
+	
+	public void Start()
+	{
+		m_runListener = true;
+		new Thread(m_listener).start();
+	}
+	
+	public void sendState(JSONObject state)
+	{
+		for(int i = 0; i < MAX_CLIENTS; ++i)
+		{
+			if(m_UDPSenders[i] != null)
+			{
+				m_UDPSenders[i].send((JSONObject)state.clone()); // Shallow copy should be fine
+			}
+		}
+	}
+	
+	public void sendScore(JSONObject score)
+	{
+		for(int i = 0; i < MAX_CLIENTS; ++i)
+		{
+			if(m_TCPSenders[i] != null)
+			{
+				m_TCPSenders[i].send(score);
+			}
+		}
+	}
+	
+	// Returns any updated player states indexed by entity id
+	@SuppressWarnings("unchecked")
+	public JSONObject getUpdatedStates()
+	{
+		JSONObject states = new JSONObject();
+		for(int i = 0; i < MAX_CLIENTS; ++i)
+		{
+			if(m_UDPReceivers[i] != null && m_UDPReceivers[i].stateUnread())
+			{
+				states.put(String.valueOf(i+1), m_UDPReceivers[i].getState()); // i+1 because ball is first entity
+			}
+		}
+		return states;
+	}
+	
+	
+	// CAVEAT: Not thread safe. Acquire mutex before calling.
+	@SuppressWarnings("unchecked")
+	private void addClient(Socket TCPSocket)
+	{
+		try
+		{
+			++m_connectedClients;
+			BufferedReader in = new BufferedReader(new InputStreamReader(TCPSocket.getInputStream()));
+			BufferedWriter out = new BufferedWriter(new OutputStreamWriter(TCPSocket.getOutputStream()));
+			
+			// Find first unused index
+			int index = 0;
+			while(m_sessions[index] != null)
+			{
+				++index;
+			}
+			// TODO: send token
+			
+			DatagramSocket UDPSocket = new DatagramSocket();
+			
+			// Send UDP port number and entity id to client
+			JSONObject message = new JSONObject();
+			String token = new BigInteger(156, new SecureRandom()).toString(64);
+			message.put("UDPport", UDPSocket.getLocalPort());
+			message.put("id", index+1); // +1 because first entity is ball
+			
+			out.write(message.toJSONString()+"\n");
+			out.flush();
+			
+			// Receive UDP port number from client
+			message = (JSONObject)JSONValue.parse(in.readLine());
+			//  ava.lang.Long cannot be cast to java.lang.Integer
+			int UDPport = (int)(long)message.get("UDPport");
+			
+			// Create objects
+			m_sessions[index] = new Session(TCPSocket, in, index);
+			m_TCPSenders[index] = new TCPSender(TCPSocket, out, index);
+			m_UDPReceivers[index] = new UDPReceiver(UDPSocket, index);
+			m_UDPSenders[index] = new UDPSender(UDPSocket, TCPSocket.getInetAddress(), UDPport, index);
+			
+			// Create threads
+			m_clientThreads[index][0] = new Thread(m_sessions[index]);
+			m_clientThreads[index][1] = new Thread(m_TCPSenders[index]);
+			m_clientThreads[index][2] = new Thread(m_UDPReceivers[index]);
+			m_clientThreads[index][3] = new Thread(m_UDPSenders[index]);
+			
+			// Start threads
+			m_run[index] = true;
+			m_clientThreads[index][0].start();
+			m_clientThreads[index][1].start();
+			m_clientThreads[index][2].start();
+			m_clientThreads[index][3].start();
+		}
+		catch(IOException e)
+		{
+			System.err.println("Could not establish connection to client, I/O error.");
+		}
+	}
+	
+	private void removeClient(int index)
+	{
+		// Shut down all threads belonging to client
+		m_run[index] = false;
+		m_clientThreads[index][0].interrupt();
+		m_clientThreads[index][1].interrupt();
+		m_clientThreads[index][2].interrupt();
+		m_clientThreads[index][3].interrupt();
+		
+		// Delete instances
+		m_sessions[index] = null;
+		m_TCPSenders[index] = null;
+		m_UDPReceivers[index] = null;
+		m_UDPSenders[index] = null;
+		m_clientThreads[index][0] = null;
+		m_clientThreads[index][1] = null;
+		m_clientThreads[index][2] = null;
+		m_clientThreads[index][3] = null;
+	}
+	
+	private class Listener implements Runnable
+	{
+		private ServerSocket m_socket;
+		
+		public Listener(int port)
+		{
+			try
+			{
+				m_socket = new ServerSocket(port);
+			}
+			catch (IOException e)
+			{ // What good is a server that can't listen to connections?
+				e.printStackTrace();
+				System.err.println("Fatal error while creating server socket.");
+				System.exit(-1);
+			}
+		}
+		
+		public void run()
+		{
+			while(m_runListener)
+			{
+				Socket TCPSocket;
+				try
+				{
+					TCPSocket = m_socket.accept();
+					m_mutex.acquire();
+					if(m_connectedClients < MAX_CLIENTS)
+					{
+						addClient(TCPSocket);
+					}
+					else
+					{
+						// TODO: send error message to client
+						TCPSocket.close();
+					}
+					m_mutex.release();
+				}
+				catch (IOException e)
+				{
+					e.printStackTrace();
+				}
+				catch (InterruptedException e)
+				{
+				}
+			}
+		}
+	}
+	
+	private class Session implements Runnable
+	{
+		private Socket m_socket;
+		private BufferedReader m_in;
+		private int m_index;
+		
+		public Session(Socket socket, BufferedReader in, int index)
+		{
+			try
+			{
+				m_socket = socket;
+				m_socket.setSoTimeout(CONNECTION_TEST_INTERVAL);
+				m_in = in;
+				m_index = index;
+			}
+			catch (SocketException e)
+			{
+				e.printStackTrace();
+			}
+		}
+		
+		public void run()
+		{
+			while(m_run[m_index])
+			{
+				boolean testConnection = false;
+				try
+				{
+					if(testConnection)
+					{
+						// Test that the connection still works by sending an empty JSONObject
+						m_TCPSenders[m_index].send(new JSONObject());
+						testConnection = false;
+					}
+					// Clients won't send any actual information 
+					m_in.readLine();
+				}
+				catch(SocketTimeoutException e)
+				{
+					// If no message has been received within the specified interval
+					testConnection = true;
+				}
+				catch (IOException e)
+				{
+					System.err.println("Lost connection to client "+m_index);
+					removeClient(m_index);
+				}
+			}
+			try
+			{
+				m_socket.close();
+			}
+			catch (IOException e)
+			{
+			}
+		}
+	}
+		
+	private class TCPSender implements Runnable
+	{
+		private Socket m_socket;
+		private BufferedWriter m_out;
+		private int m_index;
+		private BlockingQueue<JSONObject> m_outQueue;
+		
+		public TCPSender(Socket socket, BufferedWriter out, int index)
+		{
+			m_socket = socket;
+			m_out = out;
+			m_index = index;
+			m_outQueue = new LinkedBlockingQueue<JSONObject>();
+		}
+		
+		public void run()
+		{
+			while(m_run[m_index])
+			{
+				try
+				{
+					// take() will block if queue is empty 
+					m_out.write(m_outQueue.take().toJSONString()+"\n");
+					m_out.flush();
+				}
+				catch (IOException e)
+				{
+					System.err.println("Lost connection to client "+m_index);
+					removeClient(m_index);
+				}
+				catch (InterruptedException e)
+				{
+				}
+			}
+			try
+			{
+				m_socket.close();
+			}
+			catch (IOException e)
+			{
+			}
+		}
+		
+		public void send(JSONObject message)
+		{
+			m_outQueue.add(message);
+		}
+	}
+	
+	private class UDPReceiver implements Runnable
+	{
+		private DatagramSocket m_socket;
+		private JSONParser m_parser;
+		private int m_index;
+		private volatile boolean m_stateUnread; // Indicates whether a new state has been received since last read
+		private volatile JSONObject m_latestState; // Stores latest received state
+		private Semaphore m_mutex; // Used when changing latestState and unreadState
+		private int m_packetNumber;
+		
+		public UDPReceiver(DatagramSocket socket, int index)
+		{
+			m_socket = socket;
+			m_index = index;
+			m_parser = new JSONParser();
+			m_stateUnread = false;
+			m_mutex = new Semaphore(1, true);
+			m_packetNumber = 0;
+		}
+		
+		public void run()
+		{
+			byte[] data = new byte[2048]; // 2kB should be larger than anything we'll receive
+			DatagramPacket packet = new DatagramPacket(data, data.length);
+			JSONObject received;
+			int pnum;
+			while(m_run[m_index])
+			{
+				try
+				{
+					packet.setLength(data.length); // To avoid issue with some implementations
+					m_socket.receive(packet);
+					
+					received = (JSONObject) m_parser.parse(new String(packet.getData(), packet.getOffset(), packet.getLength()));
+					pnum = (int)(long)received.get("pnum");
+					if(pnum - m_packetNumber > 0) // Works even on overflow
+					{ // Unread packet
+						m_packetNumber = pnum;
+						
+						m_mutex.acquire();
+						m_stateUnread = true;
+						m_latestState = received;
+						m_mutex.release();
+					}
+					else
+					{ // TODO: DELETEME
+						System.out.println("Discarded packet with pnum= "+pnum+" and local value "+m_packetNumber);
+					}
+
+				}
+				catch (IOException e)
+				{
+					e.printStackTrace();
+					System.exit(-1);
+				}
+				catch (ParseException e)
+				{
+					e.printStackTrace();
+					System.exit(-1);
+				}
+				catch (InterruptedException e)
+				{
+					// Thread interrupted while waiting for mutex
+					// Time to die
+					return;
+				}
+			}
+		}
+		
+		public boolean stateUnread()
+		{
+			return m_stateUnread;
+		}
+		
+		public JSONObject getState()
+		{
+			JSONObject retval;
+			try
+			{
+				m_mutex.acquire();
+				retval = m_latestState;
+				m_stateUnread = false;
+				m_mutex.release();
+			}
+			catch (InterruptedException e)
+			{ // Thread interrupted while waiting on semaphore
+				// Restore interrupt flag
+				Thread.currentThread().interrupt();
+				// Return state
+				retval = m_latestState;
+				m_stateUnread = false;
+				// But don't signal on semaphore (since we didn't acquire it)
+			}
+			return retval;
+		}
+	}
+	
+	private class UDPSender implements Runnable
+	{
+		private DatagramSocket m_socket;
+		private InetAddress m_address;
+		private int m_port;
+		private int m_index;
+		private BlockingQueue<JSONObject> m_outQueue;
+		private int m_packetNumber; // Used to detect out of order and duplicate packets
+		
+		public UDPSender(DatagramSocket socket, InetAddress address, int port, int index)
+		{
+			m_socket = socket;
+			m_address = address;
+			m_port = port;
+			m_index = index;
+			m_outQueue = new LinkedBlockingQueue<JSONObject>();
+			m_packetNumber = 0;
+		}
+		
+		@SuppressWarnings("unchecked")
+		public void run()
+		{
+			JSONObject outMsg;
+			byte[] msgData;
+			DatagramPacket packet;
+			while(m_run[m_index])
+			{
+				try
+				{
+					// take() will block if queue is empty
+					outMsg = m_outQueue.take();
+					outMsg.put("pnum", ++m_packetNumber);
+					msgData = outMsg.toJSONString().getBytes();
+					packet = new DatagramPacket(msgData, msgData.length, m_address, m_port);
+					m_socket.send(packet);
+				}
+				catch (InterruptedException e)
+				{
+					// Thread interrupted while waiting, exit
+					return;
+				}
+				catch (IOException e)
+				{
+					e.printStackTrace();
+				}
+			}
+		}
+		
+		public void send(JSONObject message)
+		{
+			m_outQueue.add(message);
+		}
+	}
+}

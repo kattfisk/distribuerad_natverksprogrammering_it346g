@@ -1,0 +1,62 @@
+package GBall.server;
+
+import java.awt.Graphics;
+
+import org.json.simple.JSONObject;
+
+public class ScoreKeeper
+{
+	private static class ScoreKeeperSingletonHolder
+	{
+		public static final ScoreKeeper	instance	= new ScoreKeeper();
+	}
+
+	public static ScoreKeeper getInstance()
+	{
+		return ScoreKeeperSingletonHolder.instance;
+	}
+
+	private ScoreKeeper()
+	{
+		m_team1Score = 0;
+		m_team2Score = 0;
+		m_scoreChanged = false;
+	}
+	
+	private static int m_team1Score;
+	private static int m_team2Score;
+	private static boolean m_scoreChanged; 
+
+	public void changeScores(int deltaTeam1, int deltaTeam2)
+	{
+		m_team1Score += deltaTeam1;
+		m_team2Score += deltaTeam2;
+	}
+	
+	public boolean scoreUnread()
+	{
+		return m_scoreChanged;
+	}
+	
+	@SuppressWarnings("unchecked")
+	public static JSONObject getScore()
+	{
+		m_scoreChanged = false;
+		JSONObject score = new JSONObject();
+		score.put("score_t1", m_team1Score);
+		score.put("score_t2", m_team2Score);
+		return score;
+	}
+
+	public void render(java.awt.Graphics g)
+	{
+		g.setFont(Const.SCORE_FONT);
+		g.setColor(Const.TEAM1_COLOR);
+		g.drawString(new Integer(m_team1Score).toString(), (int) Const.TEAM1_SCORE_TEXT_POSITION.getX(),
+				(int) Const.TEAM1_SCORE_TEXT_POSITION.getY());
+
+		g.setColor(Const.TEAM2_COLOR);
+		g.drawString(new Integer(m_team2Score).toString(), (int) Const.TEAM2_SCORE_TEXT_POSITION.getX(),
+				(int) Const.TEAM2_SCORE_TEXT_POSITION.getY());
+	}
+}

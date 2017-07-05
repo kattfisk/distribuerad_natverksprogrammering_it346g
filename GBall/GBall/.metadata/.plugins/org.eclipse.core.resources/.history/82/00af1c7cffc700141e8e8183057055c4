@@ -1,0 +1,11 @@
+package GBall.client;
+
+public class GBMain
+{
+	public static void main(String[] argc)
+	{
+		// TODO: read values from command line instead of using hard coded
+		ServerConnection
+		World.getInstance().process();
+	}
+}

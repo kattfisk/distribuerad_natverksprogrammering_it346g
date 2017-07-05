@@ -1,0 +1,16 @@
+package GBall.server;
+
+public class GBMain
+{
+	public static void main(String[] argc)
+	{
+		if(argc.length == 1)
+		{
+			int port = Integer.parseInt(argc[0]);
+			ClientConnections connections = new ClientConnections(port);
+			connections.Start();
+			World.getInstance().setConnection(connections);
+			World.getInstance().process();
+		}
+	}
+}

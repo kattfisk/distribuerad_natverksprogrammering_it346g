@@ -1,0 +1,12 @@
+package GBall.server;
+
+public class GBMain
+{
+	public static void main(String[] argc)
+	{
+		// TODO: read port from command line instead of using hard coded
+		int port = 1337;
+		ClientConnections connections = new ClientConnections(port);
+		World.getInstance().process();
+	}
+}
